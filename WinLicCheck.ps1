@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 #  WinLicCheck.ps1  --  Cong cu Ra quet & Khoi phuc Ban quyen Windows / Office
 # =============================================================================
 #  Tac gia   : tiennn.ict
@@ -28,7 +28,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { chcp 65001 > $null } catch {}
 
-$Script:VERSION   = '1.0.0'
+$Script:VERSION   = '1.1.0'
 $Script:BUILDDATE = '21/07/2026'
 
 # --- Kiem tra quyen Administrator & tu nang quyen -----------------------------
@@ -239,9 +239,9 @@ function Get-ChecklistMarkInfo {
     switch ($Status) {
         'CHUACHAY'  { @{ Mark='[ ]'; Color='White';    Label=$null } }
         'DANGCHAY'  { @{ Mark='[>]'; Color='Yellow';   Label='Đang thực thi...' } }
-        'DAT'       { @{ Mark='[v]'; Color='Green';    Label='ĐẠT' } }
+        'DAT'       { @{ Mark='[v]'; Color='Green';    Label='HOÀN THÀNH' } }
         'BATTHUONG' { @{ Mark='[x]'; Color='Red';      Label='BẤT THƯỜNG' } }
-        'LUUY'      { @{ Mark='[!]'; Color='Yellow';   Label='CẦN LƯU Ý' } }
+        'LUUY'      { @{ Mark='[!]'; Color='Yellow';   Label='LƯU Ý' } }
         'LOI'       { @{ Mark='[!]'; Color='Yellow';   Label='LỖI' } }
         'BOQUA'     { @{ Mark='[-]'; Color='DarkGray'; Label='BỎ QUA' } }
         default     { @{ Mark='[ ]'; Color='White';    Label=$null } }
@@ -400,7 +400,12 @@ function Mask-Key {
     if ([string]::IsNullOrWhiteSpace($Key)) { return '(không có)' }
     $k = ($Key -replace '[^A-Za-z0-9]','')
     if ($k.Length -lt 5) { return $Key }
-    return ('XXXXX-XXXXX-XXXXX-XXXXX-' + $k.Substring($k.Length - 5))
+    # In day du key that (khong che), dinh dang lai theo nhom 5 ky tu ngan cach bang dau '-'
+    $groups = for ($i = 0; $i -lt $k.Length; $i += 5) {
+        $len = [Math]::Min(5, $k.Length - $i)
+        $k.Substring($i, $len)
+    }
+    return ($groups -join '-')
 }
 
 function Test-Internet {
@@ -484,6 +489,152 @@ function Get-BiosOemKey {
             RearmCount  = $sls.RemainingWindowsReArmCount
         }
     } catch { [PSCustomObject]@{ Key=$null; Description=$null; Pkpn=$null; RearmCount=$null } }
+}
+
+# =============================================================================
+#  GIAI MA KEY DAY DU TU DigitalProductId TRONG REGISTRY
+# -----------------------------------------------------------------------------
+#  DigitalProductId (HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion) la du
+#  lieu nhi phan Windows tu luu de HIEN THI LAI product key CUA CHINH MAY NAY
+#  (vd trong cac cong cu xem key hop phap nhu NirSoft ProduKey). Day CHI LA ma
+#  hoa Base24 cong khai (obfuscation), KHONG PHAI ma hoa bao mat, va thuat toan
+#  giai ma nay da duoc cong bo rong rai, khong lien quan crack/bypass ban quyen.
+#  Nguon doi chieu thuat toan: woshub.com "How to Extract Your Windows Product
+#  (License) Key from a Computer" - da kiem chung cho ca dinh dang truoc va tu
+#  Windows 8 tro len (co chen ky tu 'N').
+#
+#  GIOI HAN QUAN TRONG (KHONG duoc bo qua khi hien thi cho nguoi dung):
+#   - Neu may kich hoat qua "giay phep so" (lien ket tai khoan Microsoft/phan
+#     cung, khong nhap key) hoac qua KMS, DigitalProductId thuong chi chua KEY
+#     CHUNG (GVLK) cua bo cai, KHONG PHAI key that da mua. Phai doi chieu voi
+#     kenh cap phep (OEM/Retail/MAK/Volume) truoc khi coi day la "key that".
+#   - Neu la key MAK, Microsoft KHONG luu key that vao registry (vi ly do bao
+#     mat) nen ket qua giai ma se khong phan anh key MAK dang dung.
+function ConvertFrom-DigitalProductId {
+    param([byte[]]$KeyBytes)   # dung 15 byte, la doan $DigitalProductId[52..66]
+
+    if (-not $KeyBytes -or $KeyBytes.Count -lt 15) { return $null }
+
+    # Lam viec tren ban sao de khong lam hong du lieu goc
+    $bytes = [byte[]]($KeyBytes[0..14])
+    $base24 = 'BCDFGHJKMPQRTVWXY2346789'
+    $decodeStringLength = 24   # 25 lan lap -> 25 ky tu base24 truoc khi xu ly chen 'N'
+    $decodeLength = 14         # chi so byte cuoi trong doan 15 byte (0..14)
+    $decodedKey = ''
+
+    $containsN = ([math]::Floor([int]$bytes[$decodeLength] / 8)) -band 1
+    $bytes[$decodeLength] = [byte]($bytes[$decodeLength] -band 0xF7)
+
+    for ($i = $decodeStringLength; $i -ge 0; $i--) {
+        $digitMapIndex = 0
+        for ($j = $decodeLength; $j -ge 0; $j--) {
+            $digitMapIndex = ($digitMapIndex * 256) -bxor $bytes[$j]
+            $bytes[$j] = [byte]([math]::Truncate($digitMapIndex / $base24.Length))
+            $digitMapIndex = $digitMapIndex % $base24.Length
+        }
+        $decodedKey = $base24[$digitMapIndex] + $decodedKey
+    }
+
+    if ($containsN) {
+        $firstLetterIndex = $base24.IndexOf($decodedKey[0])
+        $decodedKey = $decodedKey.Remove(0, 1)
+        $decodedKey = $decodedKey.Substring(0, $firstLetterIndex) + 'N' + $decodedKey.Remove(0, $firstLetterIndex)
+    }
+
+    if ($decodedKey.Length -ne 25) { return $null }
+    for ($t = 20; $t -ge 5; $t -= 5) { $decodedKey = $decodedKey.Insert($t, '-') }
+    return $decodedKey
+}
+
+# Doc DigitalProductId cua Windows tu registry va giai ma thanh key day du.
+# Tra ve $null neu khong doc duoc hoac ket qua khong dung dinh dang 25 ky tu
+# (khong bao gio nem loi ra ngoai - day chi la thong tin bo sung, khong duoc
+# lam gian doan luong quet chinh neu that bai).
+# MAK: sau khi kich hoat, Microsoft CHU DONG xoa key that khoi DigitalProductId vi ly
+# do bao mat (tranh trich xuat lai key Volume Licensing) va thay bang chuoi gia toan
+# ky tu 'B' (vd BBBBB-BBBBB-BBBBB-BBBBB-BBBBB). Day la thiet ke co chu dich cua
+# Microsoft, KHONG PHAI gioi han cua cong cu nay va KHONG co cach nao doc lai key
+# MAK that tu registry sau khi da kich hoat. Phai nhan dien va noi ro, KHONG duoc
+# hien thi chuoi BBBBB... nhu the do la key that.
+function Test-MakPlaceholderKey {
+    param([string]$Key)
+    if (-not $Key) { return $false }
+    return ($Key -match '^(B{5}-){4}B{5}$')
+}
+
+function Get-WindowsRegistryProductKey {
+    try {
+        $raw = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+                                  -Name 'DigitalProductId' -ErrorAction Stop).DigitalProductId
+        if (-not $raw -or $raw.Count -lt 67) { return $null }
+        $key = ConvertFrom-DigitalProductId -KeyBytes $raw[52..66]
+        if (-not $key) { return $null }
+        if (Test-MakPlaceholderKey $key) { return $null }   # MAK da bi xoa - xem ham Test-MakPlaceholderKey
+        if ($key -match '^[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}$') { return $key }
+        return $null
+    } catch { return $null }
+}
+
+# =============================================================================
+#  QUET & GIAI MA DigitalProductId CHO OFFICE/VISIO/PROJECT (MSI/Volume/Retail)
+# -----------------------------------------------------------------------------
+#  Visio va Project khi cai qua MSI/Volume License dung CHUNG ha tang SPP voi
+#  Office (cung ApplicationID '0ff1ce15-...' trong SoftwareLicensingProduct - xem
+#  $Script:OFFICE_APPID), nen da duoc $Script:OffProds thu thap san. Diem con
+#  thieu la: (1) chi lay 1 san pham dau tien lam "dai dien" thay vi liet ke het,
+#  va (2) chua giai ma key day du tu registry cho Office/Visio/Project.
+#
+#  Theo nguon doi chieu (chentiangemalc.wordpress.com), thuat toan Base24 giai ma
+#  DigitalProductId la MOT, dung chung cho ca Windows va Office tu ban XP tro len
+#  (ngoai tru cac ban Office 365/Click-to-Run kieu subscription - vNext - vi cac
+#  ban nay KHONG dung co che DigitalProductId truyen thong ma dung "giay phep so"
+#  gan voi tai khoan Microsoft/phan cung, nen KHONG THE giai ma duoc theo cach
+#  nay - day la gioi han cua chinh co che C2R/vNext, khong phai gioi han cong cu).
+#
+#  Vi tri registry: HKLM:\SOFTWARE\Microsoft\Office\<version>\Registration\{GUID}
+#  (va ban sao WOW6432Node cho Office 32-bit tren Windows 64-bit). Moi {GUID} la
+#  mot san pham/goi ngon ngu duoc cai (Office core, Visio, Project, ...) nen mot
+#  may co the co NHIEU DigitalProductId - can quet het, khong dung lai o cai dau
+#  tien tim thay.
+function Get-OfficeRegistryProductKeys {
+    # QUAN TRONG: TUYET DOI KHONG duyet de quy toan bo 'HKLM:\...\Microsoft\Office' - nhanh
+    # nay chua ca cau hinh Outlook (profile/autodiscover cache), MRU, telemetry, ClickToRun,
+    # add-in... co the len toi hang nghin subkey tren may da cai du Office, khien buoc nay
+    # "dung yen" hang chuc giay den vai phut (da gap thuc te - xem bao loi). DigitalProductId
+    # CHI nam duoi '<version>\Registration\{GUID}', nen chi duyet dung nhanh do.
+    $versions = @('11.0', '12.0', '14.0', '15.0', '16.0')
+    $hives = @('HKLM:\SOFTWARE\Microsoft\Office', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office')
+    $paths = @()
+    foreach ($hive in $hives) {
+        foreach ($v in $versions) {
+            $root = Join-Path $hive "$v\Registration"
+            if (-not (Test-Path $root)) { continue }
+            try { $paths += (Get-ChildItem -Path $root -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.PSPath }) } catch {}
+        }
+    }
+
+    $results = @()
+    foreach ($p in ($paths | Select-Object -Unique)) {
+        try {
+            $raw = (Get-ItemProperty -Path $p -Name 'DigitalProductId' -ErrorAction Stop).DigitalProductId
+        } catch { continue }
+        if (-not $raw -or $raw.Count -lt 67) { continue }
+
+        $isMak = $false
+        $key = ConvertFrom-DigitalProductId -KeyBytes $raw[52..66]
+        if ($key -and (Test-MakPlaceholderKey $key)) { $isMak = $true; $key = $null }
+        elseif ($key -and -not ($key -match '^[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}$')) { $key = $null }
+
+        # Rut gon duong dan de hien thi: bo tien to provider, giu tu 'Office\...' tro di
+        $shortPath = ($p -replace '^Microsoft\.PowerShell\.Core\\Registry::', '') -replace '^HKEY_LOCAL_MACHINE\\', 'HKLM:\'
+
+        $results += [PSCustomObject]@{
+            RegistryPath = $shortPath
+            Key          = $key
+            IsMak        = $isMak
+        }
+    }
+    return $results
 }
 
 function Convert-LicenseStatus {
@@ -1234,6 +1385,7 @@ $Script:WinProds  = @()
 $Script:OffProds  = @()
 $Script:Off14     = @()
 $Script:OffVNext  = @()
+$Script:OfficeRegKeys = @()   # cache ket qua Get-OfficeRegistryProductKeys - xem Invoke-FullScan
 $Script:ForceRescanNow = $false   # bao hieu can quet lai NGAY (vd sau dang nhap lay Digital License)
 
 function Invoke-FullScan {
@@ -1299,6 +1451,11 @@ function Invoke-FullScan {
     try { $Script:OffProds = Get-LicenseProducts $Script:OFFICE_APPID } catch { $Script:OffProds = @(); $classicOk = $false }
     try { $Script:Off14    = Get-Office14Products } catch { $Script:Off14 = @(); $classicOk = $false }
     try { $Script:OffVNext = Get-OfficeVNextLicenses } catch { $Script:OffVNext = @() }
+    # Quet + giai ma DigitalProductId cua Office/Visio/Project MOT LAN duy nhat o day va
+    # luu vao cache - KHONG duoc goi lai Get-OfficeRegistryProductKeys() moi lan hien bao
+    # cao (truoc day goi 2 lan/lan xem trang chi tiet, cong voi pham vi quet qua rong, la
+    # nguyen nhan gay "dung yen" sau khi in tieu de trang chi tiet Office - xem bao loi).
+    try { $Script:OfficeRegKeys = @(Get-OfficeRegistryProductKeys) } catch { $Script:OfficeRegKeys = @() }
 
     $nClassic  = @($Script:OffProds).Count + @($Script:Off14).Count
     $nVNext    = @($Script:OffVNext | Select-Object -ExpandProperty LicenseId -Unique).Count
@@ -1443,11 +1600,12 @@ function Get-TargetLicenseState {
     if ($Target -eq 'Office' -and -not $active) {
         $c2r = Get-OfficeInventory | Where-Object { $_.Type -eq 'C2R' } | Select-Object -First 1
         if ($c2r) {
+            $pidNote = if ($c2r.ProductIds) { " Gói cài đặt (ProductIds): $($c2r.ProductIds)." } else { '' }
             return [PSCustomObject]@{
                 Target=$Target; Product=$null; Channel=$null; Description="Click-to-Run $($c2r.Version)"
                 Status=$null; Grace=$null; Permanent=$false; IsVolumeGvlk=$false
                 TechLegit=$false
-                Note='Có thể đang dùng Microsoft 365 (Office bản Click-to-Run, có thể từ version 1910 trở lên) dùng cơ chế cấp phép vNext - công cụ này KHÔNG đọc được trạng thái cấp phép kiểu vNext'
+                Note="Có thể đang dùng Microsoft 365/Office (và Visio/Project nếu có trong gói) bản Click-to-Run, có thể từ version 1910 trở lên dùng cơ chế cấp phép vNext - công cụ này KHÔNG đọc được trạng thái cấp phép kiểu vNext.$pidNote"
                 PartialKey=$null; VNextUnknown=$true
             }
         }
@@ -1470,12 +1628,58 @@ function Get-TargetLicenseState {
     elseif ($isVolGvlk -and $permanent) { $note='Volume + vĩnh viễn (BẤT THƯỜNG)' }
     else { $note = $channel }
 
+    # Key day du giai ma tu registry cho san pham "dai dien" (active). Voi Office/
+    # Visio/Project, doi chieu 5 ky tu cuoi voi cache $Script:OfficeRegKeys (da quet
+    # 1 lan duy nhat trong Invoke-FullScan - KHONG duoc goi lai Get-OfficeRegistryProductKeys()
+    # o day, se gay quet registry lap lai moi lan xem bao cao). Neu la MAK, ham
+    # Get-*RegistryProductKey/khop se tra ve $null (xem Test-MakPlaceholderKey).
+    $regKey = if ($Target -eq 'Windows') {
+        Get-WindowsRegistryProductKey
+    } elseif ($active -and $active.PartialProductKey) {
+        (@($Script:OfficeRegKeys) | Where-Object { $_.Key -and ($_.Key -replace '-','').Substring(20,5) -eq $active.PartialProductKey } | Select-Object -First 1).Key
+    } else { $null }
+
     [PSCustomObject]@{
         Target=$Target; Product=$active; Channel=$channel; Description=$desc
         Status=$status; Grace=$grace; Permanent=$permanent; IsVolumeGvlk=$isVolGvlk
         TechLegit=$techLegit; Note=$note
         PartialKey= if ($active) { $active.PartialProductKey } else { $null }
+        RegistryKey=$regKey
     }
+}
+
+# Liet ke DAY DU tat ca san pham Windows/Office/Visio/Project doc duoc (khong chi
+# 1 "dai dien" nhu Get-TargetLicenseState) - phuc vu yeu cau in ra het khi may co
+# nhieu key (nhieu ban Office, Visio, Project cung cai). Voi moi san pham, co gang
+# gan key day du tu registry (doi chieu 5 ky tu cuoi); neu la kenh MAK thi khong
+# bao gio hien key (that dat bi Microsoft xoa sau kich hoat - xem Test-MakPlaceholderKey).
+function Get-AllTargetProductRows {
+    param([ValidateSet('Windows','Office')] [string]$Target)
+
+    $prods = if ($Target -eq 'Windows') { @($Script:WinProds) } else { @($Script:OffProds) + @($Script:Off14) }
+    $regEntries = if ($Target -eq 'Office') { @($Script:OfficeRegKeys) } else { @() }
+
+    $rows = @()
+    foreach ($p in $prods) {
+        $isMakChannel = "$($p.ProductKeyChannel)" -match '(?i)MAK'
+        $fullKey = $null
+        if (-not $isMakChannel -and $p.PartialProductKey) {
+            if ($Target -eq 'Windows') {
+                $fullKey = Get-WindowsRegistryProductKey
+            } else {
+                $fullKey = ($regEntries | Where-Object { $_.Key -and ($_.Key -replace '-','').Substring(20,5) -eq $p.PartialProductKey } | Select-Object -First 1).Key
+            }
+        }
+        $note = if ($isMakChannel) { 'Kênh MAK: Microsoft xoá key thật khỏi registry sau khi kích hoạt (thiết kế bảo mật, không phải giới hạn công cụ) - chỉ còn 5 ký tự cuối' }
+                elseif ($fullKey) { $null }
+                else { 'Không giải mã được key đầy đủ (dữ liệu registry trống/không hợp lệ) - chỉ còn 5 ký tự cuối qua WMI' }
+
+        $rows += [PSCustomObject]@{
+            Name=$p.Name; Description="$($p.Description)"; Channel="$($p.ProductKeyChannel)"
+            Status=[int]$p.LicenseStatus; PartialKey=$p.PartialProductKey; FullKey=$fullKey; Note=$note
+        }
+    }
+    return $rows
 }
 
 # Ket luan tong hop cho mot doi tuong
@@ -1543,15 +1747,51 @@ function Show-TargetReport {
     $st = $v.State
 
     Write-Sub "KẾT QUẢ: $Target"
+    $allRows = @(Get-AllTargetProductRows -Target $Target)
+
     if ($Target -eq 'Windows') {
         Write-KeyVal 'Hệ điều hành' "$($Script:WinInfo.ProductName) [$($Script:WinInfo.DisplayVer)] build $($Script:WinInfo.Build)" 'White'
-        Write-KeyVal 'Key trên máy (5 ký tự cuối)' (Mask-Key $st.PartialKey) 'Magenta'
         Write-KeyVal 'Key OEM trong BIOS' (Mask-Key $Script:Bios.Key) 'Magenta'
+        $anyRegKey = $false
+        foreach ($row in $allRows) {
+            $label = if (@($allRows).Count -gt 1) { "Key: $($row.Name)" } else { 'Key trên máy' }
+            if ($row.FullKey) {
+                $last5Reg = ($row.FullKey -replace '-', '').Substring(20, 5)
+                if ($row.PartialKey -and $last5Reg -ne $row.PartialKey) {
+                    Write-KeyVal "$label (registry - CHƯA khớp WMI, cần xác minh lại)" $row.FullKey 'Yellow'
+                } else {
+                    Write-KeyVal "$label (giải mã đầy đủ từ registry)" $row.FullKey 'Magenta'
+                    $anyRegKey = $true
+                }
+            } else {
+                Write-KeyVal "$label ($($row.Note))" (Mask-Key $row.PartialKey) 'Magenta'
+            }
+        }
+        if ($anyRegKey) {
+            Write-Plain 'Lưu ý: nếu máy dùng "giấy phép số" (kích hoạt qua tài khoản Microsoft/phần cứng) hoặc KMS, key giải mã ở trên có thể chỉ là key chung (GVLK) của bộ cài đặt - KHÔNG phải key thật đã mua. Đối chiếu với kênh cấp phép bên dưới trước khi dùng key này để cài lại máy.'
+        }
     } else {
         $inv = Get-OfficeInventory
         $desc = ($inv | ForEach-Object { "$($_.Type) $($_.Version)" }) -join ', '
-        Write-KeyVal 'Office phát hiện' $(if($desc){$desc}else{'Không tìm thấy Office'}) 'White'
-        Write-KeyVal 'Key Office (5 ký tự cuối)' (Mask-Key $st.PartialKey) 'Magenta'
+        Write-KeyVal 'Office/Visio/Project phát hiện' $(if($desc){$desc}else{'Không tìm thấy'}) 'White'
+
+        if (@($allRows).Count -eq 0) {
+            Write-KeyVal 'Key' '(không đọc được sản phẩm nào qua SPP/OSPP - xem ghi chú vNext/C2R bên dưới nếu có)' 'Yellow'
+        } else {
+            $anyRegKey = $false
+            foreach ($row in $allRows) {
+                $label = "$($row.Name)"
+                if ($row.FullKey) {
+                    Write-KeyVal "$label - kênh $($row.Channel)" $row.FullKey 'Magenta'
+                    $anyRegKey = $true
+                } else {
+                    Write-KeyVal "$label - kênh $($row.Channel) ($($row.Note))" (Mask-Key $row.PartialKey) 'Magenta'
+                }
+            }
+            if ($anyRegKey) {
+                Write-Plain 'Lưu ý: nếu sản phẩm dùng "giấy phép số"/tài khoản Microsoft hoặc KMS, key giải mã ở trên có thể chỉ là key chung (GVLK) của bộ cài, KHÔNG phải key thật đã mua.'
+            }
+        }
     }
     if ($st.VNextUnknown) {
         # KHONG duoc in "khong xac dinh" + "Chua duoc cap phep (Unlicensed)" o day - se khien
@@ -1561,7 +1801,7 @@ function Show-TargetReport {
         Write-KeyVal 'Trạng thái kích hoạt' 'Không xác định được - xem lưu ý bên dưới' 'Yellow'
         Write-Host ''
         Write-Warn $st.Note
-        Write-Plain 'Đây là giới hạn của công cụ, KHÔNG phải kết luận Office chưa được cấp phép. Hãy kiểm tra trực tiếp trong Word/Excel > File > Account để xem trạng thái đăng nhập và cấp phép thực tế.'
+        Write-Plain 'Đây là giới hạn của công cụ, KHÔNG phải kết luận Office/Visio/Project chưa được cấp phép. Hãy kiểm tra trực tiếp trong Word/Excel/Visio/Project > File > Account để xem trạng thái đăng nhập và cấp phép thực tế.'
     } else {
         Write-KeyVal 'Kênh cấp phép' $(if($st.Channel){$st.Channel}else{'(không xác định)'}) 'White'
         Write-KeyVal 'Trạng thái kích hoạt' (Convert-LicenseStatus $st.Status) $(if($st.Status -eq 1){'Green'}else{'Yellow'})
@@ -1696,8 +1936,17 @@ function Backup-LicenseState {
     if ($Script:Bios -and $Script:Bios.Key) {
         Add-StepDetail ("Đã lưu key OEM từ BIOS: {0}" -f (Mask-Key $Script:Bios.Key)) 'Magenta'
     }
-    foreach ($p in @($Script:WinProds) + @($Script:OffProds)) {
-        if ($p.PartialProductKey) { Add-StepDetail ("{0}: 5 ký tự cuối key = {1} (kênh {2})" -f $p.Name, $p.PartialProductKey, $p.ProductKeyChannel) }
+    $winRegKey = Get-WindowsRegistryProductKey
+    if ($winRegKey) {
+        Add-StepDetail ("Key Windows giải mã từ registry: {0}" -f $winRegKey) 'Magenta'
+    }
+    $officeRegKeys = @($Script:OfficeRegKeys)
+    try { $officeRegKeys | Export-Clixml "$dir\office-registry-keys.xml" } catch {}
+    foreach ($p in @($Script:WinProds) + @($Script:OffProds) + @($Script:Off14)) {
+        if (-not $p.PartialProductKey) { continue }
+        $full = ($officeRegKeys | Where-Object { $_.Key -and ($_.Key -replace '-','').Substring(20,5) -eq $p.PartialProductKey } | Select-Object -First 1).Key
+        if ($full) { Add-StepDetail ("{0}: key đầy đủ (registry) = {1} (kênh {2})" -f $p.Name, $full, $p.ProductKeyChannel) }
+        else { Add-StepDetail ("{0}: 5 ký tự cuối key = {1} (kênh {2})" -f $p.Name, $p.PartialProductKey, $p.ProductKeyChannel) }
     }
     if ($okProd -ge 2) { Complete-Step -Status DAT -Note "$okProd tệp dữ liệu sản phẩm" }
     else { Complete-Step -Status LUUY -Note 'Lưu được một phần dữ liệu sản phẩm' }
@@ -1734,7 +1983,8 @@ Máy: $env:COMPUTERNAME   |   Người dùng: $env:USERNAME
 NỘI DUNG:
   slmgr-dlv.txt / slmgr-dli.txt : báo cáo giấy phép trước khi thay đổi
   windows-products.xml          : danh sách sản phẩm Windows (kênh, 5 ký tự cuối key, trạng thái)
-  office-products.xml           : danh sách sản phẩm Office
+  office-products.xml           : danh sách sản phẩm Office/Visio/Project (SPP)
+  office-registry-keys.xml      : key đầy đủ giải mã từ registry cho Office/Visio/Project (nếu có)
   bios-key.xml                  : key OEM đọc từ bảng MSDM trong BIOS (nếu có)
   *.reg                         : các nhánh registry cấp phép
   hosts.bak                     : tệp hosts trước khi dọn
@@ -2489,6 +2739,7 @@ function Invoke-Reactivate-Office {
             Start-Sleep -Seconds 2
             $Script:OffProds = Get-LicenseProducts $Script:OFFICE_APPID
             $Script:Off14    = Get-Office14Products
+            try { $Script:OfficeRegKeys = @(Get-OfficeRegistryProductKeys) } catch { $Script:OfficeRegKeys = @() }
             $actO = @($Script:OffProds) + @($Script:Off14) | Where-Object { $_.LicenseStatus -eq 1 } | Select-Object -First 1
             if ($actO) {
                 Add-StepDetail ("Đã kích hoạt: {0} (kênh {1})" -f $actO.Name, $actO.ProductKeyChannel) 'Green'
