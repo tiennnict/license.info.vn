@@ -28,8 +28,8 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { chcp 65001 > $null } catch {}
 
-$Script:VERSION   = '1.1.0'
-$Script:BUILDDATE = '21/07/2026'
+$Script:VERSION   = '1.2.0'
+$Script:BUILDDATE = '22/07/2026'
 
 # --- Kiem tra quyen Administrator & tu nang quyen -----------------------------
 function Test-IsAdmin {
@@ -2663,12 +2663,193 @@ function Invoke-EditionMismatch-Windows {
         Add-StepDetail "Đã đổi phiên bản: $curEd -> $($after.EditionID)" 'Green'
         $Script:WinInfo = $after
         Complete-Step -Status DAT -Note "Đổi thành công sang $($after.EditionID)"
-    } else {
-        Add-StepDetail 'Phiên bản chưa thay đổi.' 'Yellow'
-        Add-StepDetail 'Thường gặp khi HẠ phiên bản (vd Pro -> Home): Windows không hỗ trợ hạ tại chỗ.' 'Yellow'
-        Add-StepDetail 'Cách xử lý: cài lại Windows đúng phiên bản của key, sau đó chạy lại công cụ này.' 'Yellow'
-        Complete-Step -Status LUUY -Note 'Chưa đổi được phiên bản - có thể cần cài lại Windows'
+        return
     }
+    Add-StepDetail 'Phiên bản chưa thay đổi.' 'Yellow'
+    Add-StepDetail 'Thường gặp khi HẠ phiên bản (vd Pro/Enterprise -> Home): changepk.exe không hỗ trợ hạ tại chỗ.' 'Yellow'
+    Complete-Step -Status LUUY -Note 'changepk.exe không đổi được phiên bản - có thể cần hỗ trợ hạ phiên bản chuyên sâu hơn'
+
+    # changepk.exe chi ho tro NANG phien ban tai cho; day la gioi han da biet cua Windows khi
+    # HA phien ban (vd Pro/Enterprise -> Home). Trong truong hop nay, de nghi nguoi dung dung
+    # tinh nang HO TRO HA PHIEN BAN VE HOME (xem Invoke-DowngradeToHome-Windows ben duoi).
+    Write-Host ''
+    Write-Warn 'changepk.exe không tự hạ được phiên bản (giới hạn đã biết của Windows khi HẠ bản dựng, vd Pro/Enterprise -> Home).'
+    if (Ask-YesNo 'Dùng tính năng HỖ TRỢ HẠ PHIÊN BẢN VỀ HOME (chỉnh registry, có thể cần cài lại/Reset Windows) để dùng được key này?' -DefaultNo) {
+        Invoke-DowngradeToHome-Windows -Key $Key -Desc $Desc
+    }
+}
+
+function Test-IsWin11-24H2Plus {
+    # Windows 11 24H2 = build 26100 tro len. Get-WindowsInfo da chuan hoa ProductName thanh
+    # "Windows 11" khi Build >= 22000 nen chi can doi chieu ten + so build tai day.
+    return ($Script:WinInfo.ProductName -match 'Windows 11') -and ($Script:WinInfo.Build -ge 26100)
+}
+
+function Backup-EditionRegistry {
+    # Sao luu 2 nhanh registry se bi sua truoc khi dong tay vao - dung nguyen tac "sao luu
+    # truoc moi thao tac ghi" cua toan bo cong cu. Tra ve thu muc sao luu, hoac $null neu loi.
+    $dir = Join-Path (Get-BackupRoot) ('EditionRegistry-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    try { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null } catch { return $null }
+    $ok = $true
+    try {
+        reg.exe export 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion' (Join-Path $dir 'CurrentVersion.reg') /y 2>&1 | Out-Null
+    } catch { $ok = $false }
+    if (Test-Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion') {
+        try {
+            reg.exe export 'HKLM\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion' (Join-Path $dir 'CurrentVersion-Wow6432Node.reg') /y 2>&1 | Out-Null
+        } catch { $ok = $false }
+    }
+    if ($ok) { return $dir } else { return $null }
+}
+
+function Set-EditionDowngradeToHomeRegistry {
+    # Ap dung dung gia tri theo huong dan cong dong (khong phai phuong an chinh thuc cua
+    # Microsoft) de cac cong cu (slmgr, setup) NHAN DIEN may nhu dang chay Home va chap nhan
+    # cai key Home - CHUA doi thanh phan he thong da cai (van la Pro/Enterprise ben duoi):
+    #   Win10 : https://www.tenforums.com/tutorials/183084-downgrade-windows-10-pro-windows-10-home.html
+    #   Win11 : https://www.elevenforum.com/t/downgrade-windows-11-pro-to-windows-11-home.8648/
+    # Ca 2 huong dan deu dat ProductName = "Windows 10 Home" (kem theo CompositionEditionID
+    # tren Win11) - giu dung nhu ban goc, day la dac diem cua thu thuat nay chu khong phai loi.
+    $isWin11 = $Script:WinInfo.ProductName -match 'Windows 11'
+    $paths = @('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion')
+    if (Test-Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion') {
+        $paths += 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion'
+    }
+    $ok = $true
+    foreach ($p in $paths) {
+        try {
+            Set-ItemProperty -LiteralPath $p -Name 'EditionID' -Value 'Core' -Force -ErrorAction Stop
+            Set-ItemProperty -LiteralPath $p -Name 'ProductName' -Value 'Windows 10 Home' -Force -ErrorAction Stop
+            if ($isWin11) { Set-ItemProperty -LiteralPath $p -Name 'CompositionEditionID' -Value 'Core' -Force -ErrorAction Stop }
+        } catch { $ok = $false }
+    }
+    return $ok
+}
+
+function Invoke-DowngradeToHome-Windows {
+    # Tinh nang HO TRO HA PHIEN BAN VE HOME - ap dung khi key OEM/Retail bi tu choi vi sai
+    # SKU (0xC004F069) va changepk.exe khong tu doi duoc phien ban (truong hop HA phien ban).
+    # Re nhanh theo phien ban Windows dang chay, vi Windows 11 tu 24H2 co san tinh nang "Cai
+    # lai qua Windows Update" (Reinstall Now) khong lam mat ung dung/tai lieu - cac phien ban
+    # cu hon (Windows 10, Windows 11 <24H2) khong co tinh nang nay nen bat buoc phai cai lai
+    # hoac Reset (mat ung dung, chi giu duoc tai lieu neu chon dung "Keep my files").
+    param([string]$Key, [string]$Desc)
+
+    $curEd   = $Script:WinInfo.EditionID
+    $curName = $Script:WinInfo.ProductName
+    $build   = $Script:WinInfo.Build
+    $isWin11 = $curName -match 'Windows 11'
+    $is24H2P = Test-IsWin11-24H2Plus
+
+    Write-Host ''
+    Write-Sub 'HỖ TRỢ HẠ PHIÊN BẢN VỀ HOME ĐỂ KHỚP KEY'
+    Write-KeyVal 'Phiên bản đang chạy' "$curName ($curEd, build $build)" 'White'
+    if ($Desc) { Write-KeyVal 'Phiên bản của key' $Desc 'White' }
+    Write-Dim "Lưu ý: Thủ thuật này không phải hướng dẫn chính thức của Microsoft"
+
+    if (-not $is24H2P) {
+        # ================= NHANH A: Windows 10, hoac Windows 11 <24H2 =================
+        Write-Host ''
+        Write-Bad 'Với phiên bản Windows này, KHÔNG có cách nào hạ xuống Home mà giữ nguyên toàn bộ cài đặt/ứng dụng.'
+        Write-Warn 'Bạn phải nâng lên Windows 11 mới nhất, hoặc cài lại Windows Home (sẽ mất tất cả ứng dụng và cài đặt).'
+        Write-Host ''
+        Write-Host '   [1] Tôi sẽ tự nâng cấp/cài lại Windows (thoát, quay lại trang kết quả)' -ForegroundColor White
+        Write-Host '   [2] Hỗ trợ Reset PC - MẤT TOÀN BỘ ỨNG DỤNG, CHỈ GIỮ LẠI TÀI LIỆU)' -ForegroundColor White
+        Write-Host '   [0] Hủy' -ForegroundColor Gray
+        $c = Read-Host '  Chọn'
+        Show-Banner
+        if ($c -ne '2') { return }
+
+        Write-Host ''
+        Write-Warn 'ĐÂY LÀ THAO TÁC ẢNH HƯỞNG RẤT LỚN ĐẾN HỆ THỐNG'
+        Write-Plain 'Script sẽ đưa máy vào quy trình RESET WINDOWS.'
+        Write-Plain 'Reset sẽ cài lại hệ điều hành, mất hết ứng dụng đã cài, chỉ giữ được tài liệu cá nhân nếu bạn chọn "Keep my files" (Giữ lại tệp của tôi).'
+        if (-not (Ask-Confirm 'Tôi hiểu thao tác này sẽ dẫn tới Reset Windows và mất toàn bộ ứng dụng đã cài' 'DONGY')) { return }
+        if (-not (Ask-Confirm 'Bạn có chắc chắn muốn Reset Windows?' 'TIEPTUC')) { return }
+
+        Write-Title 'HỖ TRỢ HẠ PHIÊN BẢN VỀ HOME - GIAI ĐOẠN 1/2: CHỈNH REGISTRY & THỬ KÍCH HOẠT LẠI'
+        Start-Checklist -Title 'CHỈNH SỬA REGISTRY HẠ PHIÊN BẢN VỀ HOME' -Steps @(
+            'Sao lưu nhánh registry liên quan trước khi sửa',
+            'Áp dụng chỉnh sửa theo hướng dẫn (EditionID/ProductName -> Home)'
+        )
+        [void](Start-Step)
+        $bkDir = Backup-EditionRegistry
+        if ($bkDir) { Add-StepDetail "Đã sao lưu registry: $bkDir" 'Green'; Complete-Step -Status DAT }
+        else { Add-StepDetail 'Không sao lưu được registry' 'Yellow'; Complete-Step -Status LUUY -Note 'Không sao lưu được - vẫn tiếp tục theo yêu cầu' }
+
+        [void](Start-Step -Note 'Đặt EditionID/ProductName (và CompositionEditionID nếu là Win11) = Home')
+        $editOk = Set-EditionDowngradeToHomeRegistry
+        if (-not $editOk) {
+            Add-StepDetail 'Sửa registry thất bại (thiếu quyền hoặc registry bị khoá)' 'Red'
+            Complete-Step -Status LOI -Note 'Không sửa được registry'
+            return
+        }
+        $Script:WinInfo = Get-WindowsInfo
+        Add-StepDetail 'Đã sửa registry nhận diện phiên bản thành Home' 'Green'
+        Complete-Step -Status DAT
+
+        Write-Plain 'Thử kích hoạt lại bằng key sau khi sửa registry:'
+        [void](Invoke-ActivateWithKey -Key $Key -KeyDesc $Desc -Origin 'sau khi hạ phiên bản (registry)')
+
+        Write-Title 'HỖ TRỢ HẠ PHIÊN BẢN VỀ HOME - GIAI ĐOẠN 2/2: RESET WINDOWS'
+        Write-Warn 'KHÔNG THỂ HOÀN TÁC: Khi hộp thoại Reset hiện ra, hãy chọn "Keep my files" (Giữ lại tệp của tôi).'
+        Write-Plain 'Nếu chọn nhầm "Remove everything", toàn bộ tài liệu cá nhân cũng sẽ mất theo.'
+        if (-not (Ask-Confirm 'Xác nhận chạy Reset Windows ngay bây giờ' 'RESETPC')) {
+            Write-Info 'Đã hủy bước Reset. Bạn có thể tự vào Settings > System > Recovery > Reset this PC sau, nhớ chọn Keep my files.'
+            return
+        }
+        Write-Info 'Đang gọi lệnh systemreset...'
+        $resetErr = $null
+        try { Start-Process -FilePath 'systemreset.exe' -ErrorAction Stop } catch { $resetErr = $_ }
+        if ($resetErr) {
+            Write-Warn "systemreset không chạy được trên phiên bản Windows này ($resetErr) - tự động chuyển sang SystemSettingsAdminFlows FeaturedResetPC."
+            try { Start-Process -FilePath 'SystemSettingsAdminFlows.exe' -ArgumentList 'FeaturedResetPC' -ErrorAction Stop }
+            catch { Write-Bad 'Không mở được công cụ Reset. Hãy tự vào Settings > System > Recovery > Reset this PC (chọn Keep my files).'; return }
+        }
+        Write-Good 'Đã mở công cụ Reset Windows. Hãy làm theo hướng dẫn trên màn hình và nhớ chọn "Keep my files".'
+        Pause-Return
+        return
+    }
+
+    # ================= NHANH B: Windows 11 tu 24H2 tro len =================
+    Write-Host ''
+    Write-Good 'Windows 11 từ 24H2 trở lên hỗ trợ cài lại tại chỗ qua Windows Update - Không mất ứng dụng/tài liệu.'
+    Write-Plain 'Script có thể hỗ trợ chuyển đổi bản dựng hiện tại về Home'
+    if (-not (Ask-YesNo 'Tiếp tục chuyển đổi về Home?' -DefaultNo)) { return }
+
+    Start-Checklist -Title 'CHỈNH SỬA REGISTRY HẠ PHIÊN BẢN VỀ HOME (WINDOWS 11 24H2+)' -Steps @(
+        'Sao lưu nhánh registry liên quan trước khi sửa',
+        'Áp dụng chỉnh sửa theo hướng dẫn (EditionID/CompositionEditionID/ProductName -> Home)'
+    )
+    [void](Start-Step)
+    $bkDir = Backup-EditionRegistry
+    if ($bkDir) { Add-StepDetail "Đã sao lưu registry: $bkDir" 'Green'; Complete-Step -Status DAT }
+    else { Add-StepDetail 'Không sao lưu được registry' 'Yellow'; Complete-Step -Status LUUY -Note 'Không sao lưu được - vẫn tiếp tục theo yêu cầu' }
+
+    [void](Start-Step -Note 'Đặt EditionID/CompositionEditionID/ProductName = Home')
+    $editOk = Set-EditionDowngradeToHomeRegistry
+    if (-not $editOk) {
+        Add-StepDetail 'Sửa registry thất bại (thiếu quyền hoặc registry bị khoá)' 'Red'
+        Complete-Step -Status LOI -Note 'Không sửa được registry'
+        return
+    }
+    $Script:WinInfo = Get-WindowsInfo
+    Add-StepDetail 'Đã sửa registry nhận diện phiên bản thành Home' 'Green'
+    Complete-Step -Status DAT
+
+    Write-Plain 'Thử kích hoạt lại bằng key sau khi sửa registry:'
+    [void](Invoke-ActivateWithKey -Key $Key -KeyDesc $Desc -Origin 'sau khi hạ phiên bản (registry)')
+
+    Write-Host ''
+    Write-Sub 'CÀI LẠI QUA WINDOWS UPDATE'
+    Write-Plain 'Script sẽ mở Settings. Trong mục "Fix problems using Windows Update" (Khắc phục sự cố bằng Windows Update), hãy bấm nút "Reinstall Now" (Cài lại ngay).'
+    Write-Plain 'Thao tác này không xóa ứng dụng/tài liệu - chỉ cài lại tệp hệ thống theo đúng phiên bản Home vừa đặt trong registry, và có thể mất thời gian + khởi động lại máy.'
+    if (-not (Ask-YesNo 'Mở Settings để thực hiện bây giờ?')) { return }
+    try { Start-Process 'ms-settings:recovery' } catch { Write-Bad 'Không mở được Settings. Hãy tự vào Settings > System > Recovery.' }
+    Write-Info 'Đã mở Settings. Sau khi Reinstall Now hoàn tất và máy khởi động lại, hãy quét lại công cụ này để xác nhận.'
+    $Script:ForceRescanNow = $true
+    # Khong Pause-Return: tra ve NGAY de tang goi dua nguoi dung ve trang ket qua ngay lap
+    # tuc, khong bat cho trong luc "Reinstall Now" dang chay ngam trong Settings.
 }
 
 function Invoke-Reactivate-Office {
